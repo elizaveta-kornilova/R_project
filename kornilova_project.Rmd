@@ -1,0 +1,651 @@
+---
+title: "Лингвистический анализ коннотации игрового сленга"
+author: "Корнилова Елизавета"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Installs
+```{r installs}
+library(tidyverse)
+library(ggplot2)
+library(plotly)
+library(kableExtra)
+library(factoextra)
+library(vegan)
+library(FactoMineR)
+library(dplyr)
+library(lmtest)
+library(glmnet)
+library(text2vec)
+library(caret)
+library(Matrix)
+library(stringr)
+library(vcd)
+library(ggmosaic)
+```
+## Введение
+**Цель проекта** - разработать модель классификации коннотации игрового сленга.
+
+Датасет содержит термины игрового сленга из различных видеоигр и их классификацию по словообразовательным моделям. Проект продолжает и расширяет бакалаврскую работу, фокусируясь на определении оннотации сленговых слов и её зависимости от контекста, жанра игры, словообразовательной модели. 
+
+**Гипотезы:**
+
+H₀: Коннотация слова не зависит от части речи.
+H₁: Коннотация слова зависит от части речи.
+
+H₀: Коннотация слова не зависит от контекста.
+H₁: Коннотация слова зависит от контекста.
+
+H₀: Коннотация слова не зависит от жанра игры.
+H₁: Коннотация слова зависит от жанра игры.
+
+H₀: Коннотация слова не зависит от модели словообразования.
+H₁: Коннотация слова зависит от модели словообразования.
+
+H₀: Коннотация слова не зависит от длины слова.
+H₁: Коннотация слова зависит от длины слова
+
+Датасет содержит 209 примеров и 6 переменных.
+
+**Переменные:**
+
+- slang word: Сленговое слово или выражение
+
+- word formation model: Модель словообразования
+
+- context: Контекст использования термина
+
+- part of speech: Часть речи
+
+- Genre of game Where it appears: Жанр игры, где встречается термин
+
+- Connotation: Коннотация (нейтральная, положительная, отрицательная)
+
+- Sentence: Пример предложения со сленговым словом
+
+**Целевая переменная** — Connotation (коннотация), которая принимает следующие значения: neutral, positive, negative,	ambivalent, irony/sarcasm.
+
+
+## Предварительный анализ данных
+
+```{r data_reading}
+df <- read.csv("gaming_slang_2.csv", stringsAsFactors = FALSE)
+```
+
+Тип данных: все переменные хранятся как текстовые (chr), что может потребовать их преобразования в факторы для анализа. Пустых значений нет.
+
+```{r summary}
+str(df)
+summary(df)
+sum(is.na(df))
+```
+```{r factors}
+# Преобразование переменных в факторы
+df$word.formation.model <- as.factor(df$word.formation.model)
+df$context <- as.factor(df$context)
+df$part.of.speech <- as.factor(df$part.of.speech)
+df$Genre.of.game.Where.it.appears <- as.factor(df$Genre.of.game.Where.it.appears)
+df$Connotation <- as.factor(df$Connotation)
+```
+
+Проверка категориальных переменных выводит все уникальные значения для каждого категориального признака и помогает оценить разнообразие категорий.
+
+```{r data_description}
+cat("Уникальные значения коннотации:", levels(df$Connotation), "\n")
+cat("Уникальные модели словообразования:", levels(df$word.formation.model), "\n")
+cat("Уникальный контекст:", levels(df$context), "\n")
+cat("Уникальные части речи:", levels(df$part.of.speech), "\n")
+cat("Уникальные жанры игр:", levels(df$Genre.of.game.Where.it.appears), "\n")
+```
+
+Так как в датасете полностью отсутсвуют числовые переменные, была добавлена новая переменная word_length, потому что это потенциально важный признак в задачах автоматического распознавания коннотации.
+
+```{r new_var}
+df$word_length <- nchar(df$slang.word)
+```
+
+## Описательная статистика
+
+**Распределение коннотации**
+
+```{r palette}
+connotation_palette <- c(
+  "negative" = "salmon",
+  "neutral" = "gray",
+  "positive" = "gold",
+  "ambivalent" = "lightgreen",
+  "irony/sarcasm" = "mediumorchid"
+)
+```
+
+```{r connotation_distribution}
+ggplot(df, aes(x = Connotation, fill = Connotation)) +
+  geom_bar() +
+  scale_fill_manual(values = connotation_palette) +
+  labs(title = "Распределение коннотации игрового сленга",
+       x = "Коннотация", y = "Количество слов") +
+  theme_minimal()
+
+table(df$Connotation)
+```
+**Ключевые наблюдения**:
+
+1. **Преобладание негатива**  
+   Токсичность и критика (`negative` + `irony/sarcasm`) составляют **45.9%** терминов:  
+   Это указывает на экспрессивно-оценочный характер игрового общения.
+
+2. **Роль иронии**  
+   Высокая доля `irony/sarcasm` (21.5%) подчёркивает:  
+   - Склонность к сарказму в онлайн-среде  
+   - Использование юмора как защитного механизма
+
+3. **Недооценённые категории**  
+   - `Ambivalent` (16.7%) — перспективны для изучения контекстной зависимости  
+   - `Positive` (15.8%) — редки, что характерно для оценочного сленга
+
+**Вывод**: Игровой сленг выполняет преимущественно **оценочную** (а не описательную) функцию, с акцентом на негатив и иронию.
+
+
+```{r distribution_func}
+# Создание функции для генерации таблиц распределения
+create_connotation_table <- function(data, group_var) {
+  data %>%
+    group_by({{group_var}}, Connotation) %>%
+    summarise(Count = n(), .groups = 'drop') %>%
+    mutate(Percentage = round(Count / sum(Count) * 100, 1)) %>%
+    pivot_wider(names_from = Connotation, 
+                values_from = c(Count, Percentage),
+                names_sep = "_",
+                values_fill = list(Count = 0, Percentage = 0))
+}
+```
+
+
+**Распределение частей речи по коннотации**
+
+```{r connotation_pos}
+ggplot(df, aes(x = part.of.speech, fill = Connotation)) +
+  geom_bar(position = "dodge") +
+  scale_fill_manual(values = connotation_palette) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggtitle("Часть речи и коннотация")
+
+
+part_of_speech_table <- df %>%
+  separate_rows(part.of.speech, sep = ", ") %>%
+  create_connotation_table(part.of.speech) %>%
+  arrange(desc(Count_negative))
+
+part_of_speech_table
+```
+
+**Ключевые наблюдения**:
+
+1. **Существительные** — наиболее распространенная часть речи, при этом они чаще всего несут негативную или нейтральную окраску.
+2. **Глаголы** сравнительно нейтральны или негативны. Их положительная окраска встречается редко.
+3. **Прилагательные** склонны к позитивной коннотации.
+4. **Наречия** встречаются редко, а если встречаются, то могут были либо положительными, либо отрицательными, либо нейтральными.
+  
+
+**Распределение жанров игр и коннотаци**
+
+```{r connotation_genres}
+ggplot(df, aes(x = Genre.of.game.Where.it.appears, fill = Connotation)) +
+  geom_bar(position = "dodge") +
+  scale_fill_manual(values = connotation_palette) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggtitle("Жанры игр и коннотация")
+
+
+
+genre_table <- create_connotation_table(df, Genre.of.game.Where.it.appears) %>%
+  arrange(desc(Count_negative))
+genre_table
+```
+
+**Ключевые наблюдения**:
+
+1. Больше всего наблюдений у группы **General**, сбалансированный состав, но много негатива, то    есть в играх всех жанров преобладает негативная коннотация. 
+2. **MOBA** - второй по популярности жанр, имеет высокую долю негатива и иронии.
+3. В **MMORPG** смешанные коннотации, а в FPS сильнее негатив.Strategy, RPG, Action не имеют негативную коннотацию. 
+4. В жанрах, требующих командного взаимодействия и быстрой реакции **(MOBA, FPS)*, негатив выражен сильнее.
+
+
+**Распределение моделей словообразования и коннотации**
+
+```{r connotation_wc}
+ggplot(df, aes(x = word.formation.model, fill = Connotation)) +
+  geom_bar(position = "dodge") +
+  scale_fill_manual(values = connotation_palette) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggtitle("Словообразование и коннотация")
+
+formation_table <- create_connotation_table(df, word.formation.model) %>%
+  arrange(desc(Count_negative))
+formation_table
+```
+**Ключевые наблюдения**:
+
+1. **Суффиксация** часто используется для создания негативных ярлыков
+2. **Словосложение** практически универсально: оно может обозначать как негатив с иронией, так и позитив.
+3. **Метафоры** выражают эмоции, создают яркие и амбивалентные смыслы, тоже универсальны.
+4. **Аббревиатуры**, **конверсия** и **акронимы** в большей степени нейтральны.
+
+
+**Распределение коннотации по контексту**
+
+```{r connotation_context}
+ggplot(df, aes(x = context, fill = Connotation)) +
+  geom_bar(position = "dodge") +
+  scale_fill_manual(values = connotation_palette) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggtitle("Контекст использования слов и коннотация")
+
+context_table <- create_connotation_table(df, context) %>%
+  arrange(desc(Count_negative))
+context_table
+```
+**Ключевые наблюдения**:
+
+1. Контекст **"Evaluating other users"** 
+   максимально негативный — почти треть всех негативных выражений здесь.
+2. **"Strategies and gameplay"** - 
+   смесь коннотаций, но преобладает негатив и нейтральность.
+3. **"Game atmosphere" / "Communication"** 
+   умеренно сбалансированы.
+4. **"Victory" / "Player’s role"** 
+   больше позитива.
+5. Почти полностью нейтрален 
+   контекст **"In-game indicators"**.
+
+
+График и таблица ниже иллюстрируют, как длина сленговых слов распределена в зависимости от коннотации. 
+```{r word_lenght}
+ggplot(df, aes(x = Connotation, y = word_length, fill = Connotation)) +
+  geom_boxplot() +
+  scale_fill_manual(values = connotation_palette) +
+  labs(title = "Длина сленговых слов по коннотации",
+       x = "Коннотация", y = "Длина слова") +
+  stat_summary(fun = mean, geom = "point", shape = 18, size = 3, color = "red") +
+  theme_minimal()
+
+df %>% 
+  mutate(word_length = nchar(slang.word)) %>% 
+  group_by(Connotation) %>% 
+  summarise(mean_length = mean(word_length))
+
+# Основные статистики по длине слов
+summary(df$word_length)
+```
+**Ключевые наблюдения**:
+
+1. Самые короткие слова у нейтральной коннотации, у них медиана длины заметно ниже (около 3).Узкий IQR показывает, что много выбросов.
+2. Самые длинные в среднем у иронично-саркастической коннотации, у них медиана ближе к 8. У позитивной и иронично-саркастической коннотации распределение более широкое, встречаются как короткие, так и длинные слова.
+3. У амбивалентной и негативной коннотации медиана около 7, но у амбивалентной разброс больше, чем у негативной
+4. Нейтральные слова часто короче, возможно, потому что они более общие и часто употребимые.
+5. Ироничные/саркастические и положительные самые длинные, что может отражать степень эмоциональной окраски или изобразительности таких слов.
+
+
+## Фреквентистская статистика
+
+Перед проведение статистических тестов нужно проверить данные на нормальность. 
+
+```{r shapiro}
+shapiro.test(df$word_length)
+
+shapiro.test(df$word_length[df$Connotation == "positive"])
+
+shapiro.test(df$word_length[df$Connotation == "negative"])
+
+shapiro.test(df$word_length[df$Connotation == "irony/sarcasm"])
+
+shapiro.test(df$word_length[df$Connotation == "ambivalent"])
+
+shapiro.test(df$word_length[df$Connotation == "neutral"])
+```
+**Результаты проверки нормальности:** 
+
+1. Распределение длины слов не является нормальным, потому что p-value = 6.1e-06 < 0.05.
+2. Распределены **нормально**: 
+   слова негативной коннотации (p-value = 0.1348 > 0.05)
+   слова иронично-саркастичной коннотации (p-value = 0.2488 > 0.05)
+   слова амбивалентной коннотации (p-value = 0.09743 > 0.05)
+3. Распределены **ненормально**: 
+   слова позитивной коннотации (p-value = 0.0087 < 0.05)
+   слова нейтральной коннотации (p-value = 1.716e-05 < 0.05)
+
+
+Можно провести t-test между negative и irony/sarcasm или negative и ambivalent коннотацией, так как они распределены нормально.
+
+```{r t_test}
+t.test(word_length ~ Connotation, data = df %>% filter(Connotation %in% c("negative", "irony/sarcasm")))
+
+t.test(word_length ~ Connotation, data = df %>% filter(Connotation %in% c("negative", "ambivalent")))
+
+t.test(word_length ~ Connotation, data = df %>% filter(Connotation %in% c("irony/sarcasm", "ambivalent")))
+```
+**Интерпретация результатов t-теста:**
+
+1. Высокое p-value (0.6266, 0.348, 0.195) говорит о том, что **нет статистически значимого различия** между средними длинами слов в группах "irony/sarcasm" и "negative", "negative" и "ambivalent", "irony/sarcasm" и "ambivalent".
+2.Доверительный интервал у всех групп 95% и включает 0, что также подтверждает отсутствие значимого различия.
+3. Разница в средних небольшая, но показывает, что слова с ироничной-саркастической коннотацией длиннее слов с негативной на 0.28 и длинее слов с абивалентной на 0,8, а слова с негативной коннотацией длиннее слов с амбивалентной на 0.56.
+
+Согласно результатам Welch t-теста, гипотеза о равенстве средних длины слов в группах "irony/sarcasm" и "negative" не отвергается. Это означает, что ироничные/саркастичные, негативные и амбивалентные термины не отличаются по длине.
+
+
+Для проверки других видов коннотации будет использован тест Манна-Уитни (U-тест), так как он не требует нормальности распределения, в отличие от t-теста. 
+
+```{r u_test}
+connotations <- unique(df$Connotation)
+pairs <- combn(connotations, 2, simplify = FALSE)
+
+for (pair in pairs) {
+  group1 <- pair[1]
+  group2 <- pair[2]
+  
+  cat("\nТест Манна-Уитни для:", group1, "vs", group2, "\n")
+  result <- wilcox.test(
+    word_length ~ Connotation,
+    data = df %>% filter(Connotation %in% c(group1, group2))
+  )
+  print(result)
+}
+```
+**Интерпретация результатов тестов Манна-Уитн:**
+
+Для большинства пар p-value больше 0.05, то есть различия статистически незначимы.
+Однако были обнаружены статистически значимые различия (p < 0.05):
+
+1. Слова в нейтральной группе и амбивалентной имеют значимо разную длину (0.0045 < 0.05). 
+2. Значимы различия и в группе ироничные VS нейтральные (0.00018 < 0.05). 
+3. Отрицательные слова имеют статистически иную длину, чем нейтральные (0.0000829 < 0.05).
+4. Различия между позитивными и нейтральными словами также значимы (0.0457 < 0.05).
+
+Самый интересный вывод — нейтральная коннотация выделяется по длине слов. Это может означать, что нейтральные термины короче/длиннее по сравнению с стальными. Остальные эмоциональные категории — положительные, отрицательные, ироничные и амбивалентные — не сильно различаются между собой по длине слов.
+
+
+Чтобы точно определить, короче или длиннее нейтральные слова по сравнению с другими типами коннотации, проводится сравнение медиан.
+
+```{r median_comparison}
+df %>%
+  group_by(Connotation) %>%
+  summarise(
+    Median = median(word_length),
+    Mean = mean(word_length),
+    SD = sd(word_length)
+  ) %>%
+  arrange(Median)
+```
+**Ключевые закономерности:**
+
+1. Нейтральные термины существенно короче всех остальных.
+2. Позитивные термины занимают промежуточное положение.
+3. Негативные, ироничные и амбивалентные термины самые длинные.
+
+Подтверждается ранее полученными тестами:
+
+Все сравнения нейтральных слов с другими типами коннотации были статистически значимыми (p < 0.05). Различия между негативными, ироничными и амбивалентными терминами незначимы.
+
+
+Для проверки зависимости между категориальными переменными, проводится тест хи-квадрат, так как данных достаточно много и тест Фишера будет неэффектиным.
+
+```{r xi_test}
+# связь коннотации и жанра
+chisq.test(table(df$Connotation, 
+                df$Genre.of.game.Where.it.appears))
+
+# связь коннотации и контекста
+chisq.test(table(df$context, df$Connotation))
+
+# связь коннотации и модели словообразования
+chisq.test(table(df$Connotation, df$word.formation.model))
+
+# связь коннотации и части речи
+chisq.test(table(df$Connotation, df$part.of.speech))
+```
+**Интерпретация результатов теста хи-квадрат:**
+
+1. **Коннотация и жанр игры**
+   p > 0.05, значит, нет статистически значимой связи, жанр игры не влияет на коннотацию слова.
+2. **Коннотация и контекст**
+   p < 0.001, значит, очень сильная статистическая связь, контекст использования игрового сленга существенно влияет на коннотацию.
+
+3. **Коннотация и словообразовательная модель**
+   p < 0.001, значит, существенная зависимость, модель словообразования влияет на коннотацию.
+
+4. **Коннотация и часть речи**
+   p = 0.004222 < 0.05, значит, мы отвергаем H0, есть статистически значимая связь, коннотация слова зависит от части речи.
+
+
+## Корреляционный анализ
+
+В дополнение к хи-квадрат тесту используется Cramér’s V, показать силу зависимости переменных Connotation и context. 
+
+```{r corr}
+tbl <- table(df$Connotation, df$context)
+assocstats(tbl)
+mosaicplot(tbl,
+           main = "Связь между контекстом и коннотацией",
+           color = connotation_palette, 
+           shade = FALSE,
+           las = 2,
+           cex.axis = 0.8)
+
+
+ggplot(data = df) +
+  geom_mosaic(aes(weight = 1, x = product(context), fill = Connotation)) +
+  labs(x = "Контекст", y = "Доля", fill = "Коннотация") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  scale_fill_manual(values = connotation_palette)
+
+```
+**Вывод:**
+
+Распределения коннотаций заметно различаются между контекстами. Например:
+
+- **"Evaluating other users"** — явно преобладает ирония и негатив.
+
+- **"Victory / Player’s role"** — заметно больше позитивных слов.
+
+- **"Game mechanics" и "In-game indicators"** — много нейтральных слов.
+
+Результат Cramér’s V составил V = 0.442, что соответствует умеренной статистически значимой связи между контекстом и эмоциональной окраской сленговых слов.
+Это подтверждает, что контекст влияет на коннотацию слов.
+
+## Методы сокращения размерности
+
+Чтобы исследовать структуру категориальных признаков (жанр, контекст, часть речи, модель словообразования), был проведён множественный корреспондентный анализ (MCA). Результирующая проекция позволила визуализировать взаиморасположение категорий и выявить близость между признаками.
+
+```{r mca}
+gaming_slang_mca <- df %>%
+  select(part.of.speech, context, Genre.of.game.Where.it.appears, 
+         word.formation.model) %>%
+  mutate(across(everything(), as.factor))
+
+mca_result <- MCA(gaming_slang_mca, ncp = 5, graph = FALSE)
+
+fviz_mca_ind(mca_result,
+             label = "none", 
+             habillage = df$Connotation,
+             addEllipses = TRUE,
+             repel = TRUE,
+             palette = connotation_palette,
+             ggtheme = theme_minimal())
+
+fviz_mca_var(mca_result, choice = "mca.cor", repel = TRUE)
+
+```
+
+**Интерпретация анализа соответствий:**
+
+График Variables-MCA отображает вклад переменных в мультикорреспондентный анализ (MCA). Он показывает, какие переменные сильнее всего связаны с главными компонентами (Dim1 и Dim2).
+
+1. Самый сильный вклад имеют переменные word.formation.model и context, то есть, именно они наиболее информативны для различения значений признаков, в том числе и целевой переменной Connotation.
+
+2. Умеренный вклад вносят переменные part.of.speech и Genre.of.game.Where.it.appears. Они могут дополнять различие между наблюдениями, но не доминируют в объяснении дисперсии.
+
+3. Dim1 (7.2%) и Dim2 (6.3%) объясняют всего 13.5% дисперсии, и это мало, для достижения 50% объясненной дисперсии требуется 10 осей.
+
+Для последующего анализа стоит акцентировать внимание на word.formation.model и context.
+
+
+## Регрессионный анализ
+
+В рамках данного проекта была разработана модель для предсказания коннотации игрового сленга.
+
+**Цель модели:** разработать классификатор, способный автоматически определять коннотацию игрового сленга на основе текстовых признаков, включая контекст использования, жанр игры, часть речи и модель словообразования.
+
+**Модель должна помочь:** автоматически анализировать тональность игровых терминов, улучшить модерацию чатов в онлайн-играх, исследовать закономерности использования сленга.
+
+**Задачи модели:**
+
+1. Предобработка данных: текстовая очистка, объединение признаков, обработка пропусков.
+2. Балансировка данных: Oversampling и использование upSample() для устранения дисбаланса классов.
+3. Векторизация текста (TF-IDF): токенизация, разбиение текста на слова и биграммы, построение словаря, отбор частотных терминов, преобразование в матрицу.
+4. Обучение модели: логистическая регрессия (многоклассовая классификация) с регуляризацией (Elastic Net).
+5. Оценка качества.
+
+```{r prediction}
+# 1. Предобработка данных
+
+# Очистка текста
+clean_text <- function(text) {
+  text %>%
+    tolower() %>%
+    stringi::stri_trans_general("Latin-ASCII") %>%
+    str_replace_all("[^a-z0-9!? ]", " ") %>%
+    str_squish()
+}
+
+# Объединение признаков
+df$combined_text <- df %>%
+  mutate(
+    combined_text = paste(
+      clean_text(Sentence),
+      clean_text(part.of.speech),
+      clean_text(Genre.of.game.Where.it.appears),
+      clean_text(context),
+      clean_text(word.formation.model)
+    ) %>% str_squish()
+  ) %>%
+  pull(combined_text)
+
+# NA
+df_clean <- df %>% filter(!is.na(combined_text), !is.na(Connotation))
+
+# 2. Балансировка данных
+# Oversampling
+set.seed(123)
+upsampled_data <- upSample(
+  x = df_clean["combined_text"],
+  y = df_clean$Connotation,
+  yname = "Connotation"
+)
+
+# Разделение данных
+set.seed(123)
+train_index <- createDataPartition(upsampled_data$Connotation, p = 0.8, list = FALSE)
+train_data <- upsampled_data[train_index, ]
+test_data <- upsampled_data[-train_index, ]
+
+#3. Векторизация текста (TF-IDF)
+tokens <- itoken(train_data$combined_text, tokenizer = word_tokenizer, progressbar = FALSE)
+vocab <- create_vocabulary(tokens, ngram = c(1, 2)) %>%
+  prune_vocabulary(term_count_min = 5)  # фильтрация редких
+
+vectorizer <- vocab_vectorizer(vocab)
+
+dtm_train <- create_dtm(tokens, vectorizer)
+tfidf <- TfIdf$new()
+dtm_train_tfidf <- fit_transform(dtm_train, tfidf)
+
+# 4. Обучение модели
+# Преобразование тестовой выборки
+test_tokens <- itoken(test_data$combined_text,
+                      tokenizer = word_tokenizer,
+                      progressbar = FALSE)
+
+
+dtm_test <- create_dtm(test_tokens, vectorizer)
+dtm_test_tfidf <- transform(dtm_test, tfidf)
+
+# Модель
+model <- cv.glmnet(
+  x = dtm_train_tfidf,
+  y = train_data$Connotation,
+  family = "multinomial",
+  type.measure = "class",
+  alpha = 0.5
+)
+
+# 5. Предсказания и оценка
+preds <- predict(model, dtm_test_tfidf, s = "lambda.min", type = "class")
+confusionMatrix(as.factor(preds), test_data$Connotation)
+```
+Несмотря на то, что MCA выделил context и word.formation.model как наиболее информативные признаки, сокращение модели до этих переменных привело к снижению качества классификации (точность упала с 66% до 60%, Kappa — с 0.575 до 0.5). Поэтому в финальной модели были сохранены все текстовые признаки (context, part.of.speech, word.formation.model, genre, sentence), что позволило достичь лучшего баланса между интерпретируемостью и точностью.
+
+**Результаты:**
+
+- Accuracy = 66% - модель показывает точность выше случайного угадывания
+- Kappa = 0.575 — умеренное согласие модели с истинными метками.
+- F1 ≈ 0.67
+
+**Анализ метрик:**
+
+1. **Для класса ambivalent:** 
+   модель находит 60% реальных ambivalent случаев.
+2. **Для класса irony/sarcasm:** 
+   высокая Sensitivity, но слабая Precision: модель часто предсказывает иронию ошибочно.
+3. **Для класса negative:** 
+   отличная Precision ((нет ложных срабатываний), но малая Sensitivity. 
+4. **Для класса neutral:** 
+   хороший баланс.
+5. **Для класса positive:** 
+   слабее neutral, но лучше irony.
+
+**Наблюдения:**
+
+1. Классы "negative" и "neutral" имеют наименьшее количество ошибок
+2. Классы "irony/sarcasm" и "positive" часто путаются между собой и с другими классами
+3. Класс "negative" не имеет ложных срабатываний (все 6 предсказаний верны)
+4. Модель хорошо отличает negative и neutral.
+
+**Вывод:**
+
+Модель демонстрирует хороший базовый уровень классификации, но требует доработки в области различения близких по смыслу классов (особенно irony/sarcasm и positive). Наибольшие проблемы связаны с многозначностью некоторых игровых терминов и дисбалансом в классах. 
+
+```{r pred_func}
+# Функция для предсказания коннотации
+predict_connotation <- function(sentence, model, vectorizer, tfidf) {
+  token <- itoken(sentence,
+                  preprocessor = tolower,
+                  tokenizer = word_tokenizer,
+                  progressbar = FALSE)
+  
+  dtm <- create_dtm(token, vectorizer)
+  dtm_tfidf <- transform(dtm, tfidf)
+  prediction <- predict(model, dtm_tfidf, s = "lambda.min", type = "class")
+  return(as.character(prediction))
+}
+```
+
+
+```{r pred_result}
+# Предсказание коннотации предложения
+predict_connotation("Press E to attack.", model, vectorizer, tfidf)
+predict_connotation("That player is a total feeder.", model, vectorizer, tfidf)
+predict_connotation("You are a top banger.", model, vectorizer, tfidf)
+predict_connotation("Our team is a total clown fiesta.", model, vectorizer, tfidf)
+predict_connotation("It is GG, guys.", model, vectorizer, tfidf)
+predict_connotation("My new weapon imba", model, vectorizer, tfidf)
+```
